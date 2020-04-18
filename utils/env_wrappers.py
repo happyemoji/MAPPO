@@ -16,6 +16,12 @@ def worker(remote, parent_remote, env_fn_wrapper):
             if all(done):
                 ob = env.reset()
             remote.send((ob, reward, done, info))
+        elif cmd[0] == 'new_starts_obs':
+            now_agent_num = cmd[1]
+            starts = cmd[2]
+            seed = cmd[3]
+            ob, rou_index= env.new_starts_obs(starts,now_agent_num,seed)
+            remote.send((ob,rou_index))
         elif cmd[0:5] == 'reset':
             now_agent_num = int(cmd[5:])
             ob = env.reset(now_agent_num)
@@ -24,9 +30,6 @@ def worker(remote, parent_remote, env_fn_wrapper):
             now_agent_num = int(cmd[8:])
             ob = env.init_set(now_agent_num)
             remote.send(ob)
-        # elif cmd == 'reset':
-        #     ob = env.reset()
-        #     remote.send(ob)
         elif cmd == 'reset_task':
             ob = env.reset_task()
             remote.send(ob)
@@ -37,8 +40,7 @@ def worker(remote, parent_remote, env_fn_wrapper):
             remote.send((env.observation_space, env.action_space))
         elif cmd == 'get_agent_types':
             if all([hasattr(a, 'adversary') for a in env.agents]):
-                remote.send(['adversary' if a.adversary else 'agent' for a in
-                             env.agents])
+                remote.send(['adversary' if a.adversary else 'agent' for a in env.agents])
             else:
                 remote.send(['agent' for _ in env.agents])
         else:
@@ -84,6 +86,25 @@ class SubprocVecEnv(VecEnv):
     #     for remote in self.remotes:
     #         remote.send(('reset', None))
     #     return np.stack([remote.recv() for remote in self.remotes])
+
+    def new_starts_obs(self, starts, now_agent_num):
+        self.new_starts_obs_async(starts, now_agent_num)
+        return self.new_starts_obs_wait()
+
+    def new_starts_obs_async(self, starts, now_agent_num):
+        tmp_list = ['new_starts_obs', now_agent_num, starts]
+        i = 0
+        for remote in self.remotes:
+            seed = [1 + i * 1000]
+            remote.send((tmp_list + seed, None))
+            i += 1
+        self.waiting = True
+
+    def new_starts_obs_wait(self):
+        results = [remote.recv() for remote in self.remotes]
+        self.waiting = False
+        obs, rou_index = zip(*results)
+        return np.stack(obs), np.stack(rou_index)
 
     def init_set(self, now_agent_num, ratio):
         hard_num = int(self.length * ratio)
