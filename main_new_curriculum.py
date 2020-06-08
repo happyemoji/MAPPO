@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
 
 from a2c_ppo_acktr import algo, utils
 from a2c_ppo_acktr.algo import gail
@@ -25,6 +26,13 @@ from utils.make_env import make_env
 from utils.env_wrappers import SubprocVecEnv, DummyVecEnv
 import pdb
 import random
+import copy
+import matplotlib.pyplot as plt
+from tensorboardX import SummaryWriter
+from guppy import hpy
+
+import os
+os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
 
 #env = make_env("simple_spread", discrete_action=True)
 #env.seed(1)
@@ -44,10 +52,103 @@ def make_parallel_env(env_id, n_rollout_threads, seed, discrete_action):
     else:
         return SubprocVecEnv([get_env_fn(i) for i in range(n_rollout_threads)])
 
+# def SampleNearby(starts, N_new, max_step, TB, M):
+#     starts = starts + []
+#     if starts==[]:
+#         return []
+#     else:
+#         while len(starts) < M:
+#             st = random.sample(starts,1)[0]
+#             s_len = len(st)
+#             for t in range(TB):
+#                 for i in range(s_len):
+#                     epsilon_x = -2 * max_step * random.random() + max_step
+#                     epsilon_y = -2 * max_step * random.random() + max_step
+#                     st[i][0] = st[i][0] + epsilon_x
+#                     st[i][1] = st[i][1] + epsilon_y
+#                     # pdb.set_trace()
+#                     tmp_epsilon_x = max_step * random.random() #0-0.01
+#                     tmp_epsilon_y = max_step * random.random()
+#                     if st[i][0] > 1.0:
+#                         st[i][0] -= tmp_epsilon_x
+#                     if st[i][0] < -1.0:
+#                         st[i][0] += tmp_epsilon_x
+#                     if st[i][1] > 1.0:
+#                         st[i][1] -= tmp_epsilon_y
+#                     if st[i][1] < -1.0:
+#                         st[i][1] += tmp_epsilon_y
+#                 starts.append(copy.deepcopy(st))
+#                 # starts.append(st)
+#             # pdb.set_trace()
+#         starts_new = random.sample(starts,N_new)
+#         return starts_new
+
+def SampleNearby(starts, N_new, max_step, TB, M):
+    starts = starts + []
+    len_start = len(starts)
+    starts_new = []
+    if starts==[]:
+        return []
+    else:
+        for i in range(len_start):
+            st = copy.deepcopy(starts[i])
+            s_len = len(st)
+            for t in range(TB):
+                for i in range(s_len):
+                    epsilon_x = -2 * max_step * random.random() + max_step
+                    epsilon_y = -2 * max_step * random.random() + max_step
+                    st[i][0] = st[i][0] + epsilon_x
+                    st[i][1] = st[i][1] + epsilon_y
+                    # pdb.set_trace()
+                    # tmp_epsilon_x = max_step * random.random() #0-0.01
+                    # tmp_epsilon_y = max_step * random.random()
+                    # if st[i][0] > 1.0:
+                    #     st[i][0] -= tmp_epsilon_x
+                    # if st[i][0] < -1.0:
+                    #     st[i][0] += tmp_epsilon_x
+                    # if st[i][1] > 1.0:
+                    #     st[i][1] -= tmp_epsilon_y
+                    # if st[i][1] < -1.0:
+                    #     st[i][1] += tmp_epsilon_y
+                    if st[i][0] > 1.0:
+                        st[i][0] = 1.0 - random.random()*0.01
+                    if st[i][0] < -1.0:
+                        st[i][0] = -1.0 + random.random()*0.01
+                    if st[i][1] > 1.0:
+                        st[i][1] = 1.0 - random.random()*0.01
+                    if st[i][1] < -1.0:
+                        st[i][1] = -1.0 + random.random()*0.01
+                starts_new.append(copy.deepcopy(st))
+                # starts.append(st)
+        if len(starts_new) <= N_new:
+            starts_new = random.sample(starts_new, len(starts_new))
+        else:
+            starts_new = random.sample(starts_new, N_new)
+        return starts_new
+
+def Uniformsampling(N_new, now_agent_num):
+    one_starts_landmark = []
+    one_starts_agent = []
+    starts = []
+    for j in range(N_new):
+        for i in range(now_agent_num):
+            landmark_location = np.random.uniform(-1, +1, 2) 
+            agent_location = np.random.uniform(-1, +1, 2)
+            one_starts_landmark.append(copy.deepcopy(landmark_location))
+            one_starts_agent.append(copy.deepcopy(agent_location))
+        # pdb.set_trace()
+        starts.append(one_starts_agent+one_starts_landmark)
+        one_starts_agent = []
+        one_starts_landmark = []
+    return starts
 
 def main():
+    # hxx = hpy()
+    # heap = hxx.heap()
+    # byrcs = hxx.heap().byrcs
+    # print(heap)
+    # print(byrcs[0].byid)
     args = get_args()
-
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
 
@@ -62,11 +163,13 @@ def main():
 
     torch.set_num_threads(1)
     device = torch.device("cuda:0" if args.cuda else "cpu")
+    writer = SummaryWriter("/home/chenjy/new_version/logs"+args.model_dir+"/validation")
 
     #envs = make_vec_envs(args.env_name, args.seed, args.num_processes,
     #                    args.gamma, args.log_dir, device, False)
 
     envs = make_parallel_env(args.env_name, args.num_processes, args.seed, True)
+    env_test = make_env("simple_spread", discrete_action=True)
 
     '''
     actor_critic = Policy(
@@ -79,7 +182,7 @@ def main():
     actor_critic = []
     # for i in range(args.agent_num):
     #     # actor_critic, ob_rms = torch.load('/home/chenjy/new_version/trained_models/ppo' + args.model_dir + '/agent_%i' % (i+1) + ".pt")
-    #     ac, ob_rms = torch.load('/home/chenjy/new_version/trained_models/ppo/run4_policyattention_true'  + '/agent_1' + ".pt")
+    #     ac, ob_rms = torch.load('/home/chenjy/new_version/trained_models/ppo/run4_reverse_3'  + '/agent_1' + ".pt")
     #     ac.to(device)
     #     actor_critic.append(ac)
     if args.share_policy:
@@ -117,7 +220,7 @@ def main():
                 base_kwargs={'recurrent': args.recurrent_policy})
             ac.to(device)
             actor_critic.append(ac)
-    # #import pdb; pdb.set_trace()
+    #import pdb; pdb.set_trace()
     
     if args.algo == 'a2c':
         agent = algo.A2C_ACKTR(
@@ -201,15 +304,71 @@ def main():
         args.num_env_steps) // args.num_steps // args.num_processes
     print(num_updates)
 
-    now_agent_num = 4
+    now_agent_num = args.agent_num
     ratio = 1
+    # 给定初始的状态分布
+    starts = []
+    starts_old = []
+    buffer_length = 10000
+    curri = 0
+    # N_new = 1000
+    N_new = 350
+    N_old = 350
+    max_step = 0.1
+    TB = 5
+    M = 10000  # M代表一个starts点需要向M个方向扩展
+    Rmin = 0.1
+    Rmax = 0.7
+    Cmin = 0.4
+    Cmax = 0.8
+    curri = len(starts_old)
+    # 此处agent和哪个landmark对应是随机的，每次随机是确定的
+    # pdb.set_trace()
+    x1 = []
+    y1 = []
+    x2 = []
+    y2 = []
+    Rew = []
+    one_starts_landmark = []
+    one_starts_agent = []
+    starts = []
+    starts_old = Uniformsampling(N_old, now_agent_num)
+
     for j in range(num_updates):
-        # if j % 1000 == 0 and j != 0:
-        #     now_agent_num = now_agent_num + 1
-        # obs = envs.init_set(now_agent_num,ratio) #ratio=0代表uniform sampling
-        #经过6000epoch，数量翻倍
-        # now_agent_num = now_agent_num + 1
-        obs = envs.reset(now_agent_num)
+        starts = Uniformsampling(N_new, now_agent_num)
+        if len(starts_old)< N_old:
+            hard_case = copy.deepcopy(starts_old)
+        else:
+            hard_case = random.sample(list(starts_old), N_old)
+        starts = starts + hard_case
+        print('starts_length: ', len(starts))
+        # sample_index = random.sample(range(len(starts)), args.num_processes)
+        # sample_starts = []
+        # for i in range(len(sample_index)):
+        #     sample_starts.append(copy.deepcopy(starts[sample_index[i]]))
+        obs = envs.new_starts_obs(starts, now_agent_num)
+        # obs = envs.reset(now_agent_num)
+        # 每次starts由扩展来的点和uniform的点组成
+        
+        # 每10步存一次，每次存10个,查看samplenearby的数据
+        # if j % 1 ==0:
+        #     if starts!=[]:
+        #         if len(starts)>=10:
+        #             for k in range(10):
+        #                 for i in range(now_agent_num):
+        #                     x1.append(starts[k][i][0])
+        #                     y1.append(starts[k][i][1])
+        #                     x2.append(starts[k][i+now_agent_num][0])
+        #                     y2.append(starts[k][i+now_agent_num][1])
+        #                 plt.scatter(x1,y1,c='#0000FF')
+        #                 plt.scatter(x2,y2,c='#A52A2A')
+        #                 x1 = []
+        #                 y1 = []
+        #                 x2 = []
+        #                 y2 = []
+        #                 plt.savefig('/home/chenjy/new_version/samplenearby/sample_'+str(j)+'_'+str(k)+'.jpg')
+        #                 plt.clf()
+
         print("now_agent_num: ", now_agent_num)
         rollouts = []
         for i in range(now_agent_num):
@@ -229,6 +388,7 @@ def main():
                 rollouts[i].share_obs[0].copy_(torch.cat((as_obs, vec_id),1))
                 rollouts[i].obs[0].copy_(torch.cat((a_obs, vec_id),1))
                 rollouts[i].to(device)
+
         else:
             for i in range(now_agent_num):
                 # pdb.set_trace()
@@ -237,8 +397,8 @@ def main():
                 rollouts[i].to(device)
         #pdb.set_trace()
         # 保证参与训练的所有agent参数一致
-        for i in range(now_agent_num):
-            agent[i] = agent[0]
+        # for i in range(now_agent_num):
+        #     agent[i] = agent[0]
 
         if args.use_linear_lr_decay:
             # decrease learning rate linearly
@@ -246,7 +406,7 @@ def main():
                 utils.update_linear_schedule(
                     agent[i].optimizer, j, num_updates,
                     agent[i].optimizer.lr if args.algo == "acktr" else args.lr)
-
+    
         for step in range(args.num_steps):
             # Sample actions
             value_list, action_list, action_log_prob_list, recurrent_hidden_states_list = [], [], [], []
@@ -257,7 +417,6 @@ def main():
                         rollouts[i].share_obs[step],
                         rollouts[i].obs[step], now_agent_num, rollouts[i].recurrent_hidden_states[step],
                         rollouts[i].masks[step])
-                    #import pdb; pdb.set_trace()
                     value_list.append(value)
                     action_list.append(action)
                     action_log_prob_list.append(action_log_prob)
@@ -271,7 +430,6 @@ def main():
                     one_hot_action[action_list[k][i]] = 1
                     one_env_action.append(one_hot_action)
                 action.append(one_env_action)
-         
             obs, reward, done, infos = envs.step(action)
 
             for info in infos:
@@ -309,6 +467,65 @@ def main():
                                 recurrent_hidden_states, action_list[i],
                                 action_log_prob_list[i], value_list[i], torch.tensor(reward[:, i].reshape(-1,1)), masks, bad_masks)
         
+        # select starts using Rew
+        # Rew = rollouts[0].rewards.mean(axis=0)
+        # starts_tmp = [] 
+        # for i in range(len(Rew)):
+        #     if Rew[i]>= Rmin and Rew[i]<= Rmax:
+        #         starts_tmp.append(copy.deepcopy(starts[rou_index[i]]))
+        # starts = copy.deepcopy(starts_tmp)
+
+        # select starts using coverage rate
+        select_starts = [] 
+        add_starts = []
+        for i in range(len(infos)):
+            if infos[i]['n'][0]>= Cmin and infos[i]['n'][0]<= Cmax:
+                if i < N_new:
+                    select_starts.append(copy.deepcopy(starts[i]))
+                    add_starts.append(copy.deepcopy(starts[i]))
+                else:
+                    select_starts.append(copy.deepcopy(starts[i]))
+        print('select_num: ', len(select_starts))
+        print('add_num: ', len(add_starts))
+
+        if len(starts_old) < buffer_length:
+            starts_old = starts_old + add_starts
+        else:
+            starts_old = starts_old[len(add_starts):] + add_starts
+        print("old_length: ", len(starts_old))
+        
+        # validation
+        # uniform init
+        Rew = []
+        obs_test = env_test.reset(now_agent_num)
+
+        for step in range(args.num_steps):
+            state_test = torch.tensor([state for state in obs_test], dtype=torch.float).cuda()
+            share_obs_test = state_test.view(1,-1)
+            actions_test = []
+            for i in range(now_agent_num):
+                one_obs_test = state_test[i].view(-1, env_test.observation_space[0].shape[0])
+                # value, action, _, recurrent_hidden_states, alpha_agent, alpha_landmark = agents[i].act(share_obs, obs, nagents, i, recurrent_hidden_states, masks)
+                value, action, action_prob, recurrent_hidden_states = actor_critic[i].act(share_obs_test, one_obs_test, now_agent_num, recurrent_hidden_states, masks, False)
+                actions_test.append(action)
+                # al_agent.append(alpha_agent)
+                # al_landmark.append(alpha_landmark)
+            prob_actions = [ac.data.cpu().numpy().flatten() for ac in actions_test]
+            actions_test = []
+            for a in prob_actions:
+                #index = np.argmax(a)
+                ac = np.zeros(env_test.action_space[0].n)
+                ac[a] = 1
+                actions_test.append(ac)
+            obs_test, rewards_test, dones_test, infos_test = env_test.step(actions_test)
+            Rew.append(rewards_test)
+        writer.add_scalars('agent0/mean_episode_reward_validation',
+                    {'reward': np.mean(Rew)},j)
+        print('Rew_test: ', np.mean(Rew))
+        Rew = []
+        print('test_cover_rate: ',infos_test['n'][0])
+
+        
         with torch.no_grad():
             next_value_list = []
             for i in range(now_agent_num):
@@ -343,9 +560,47 @@ def main():
             #import pdb; pdb.set_trace()
             if (i == 0 and (j+1)%10 == 0):
                 print("update num: " + str(j+1) + " value loss: " + str(value_loss))
+        
+        # hxx = hpy()
+        # heap = hxx.heap()
+        # byrcs = hxx.heap().byrcs
+        # print(heap)
+        # print(byrcs[0].byid)
+
         # print('rollouts.rewards: ', rollouts[0].rewards.shape)
-        if rollouts[0].rewards.mean() >= 0.6:
-            now_agent_num = now_agent_num * 2
+
+
+        # if j % 1 ==0:
+        #     if starts!=[]:
+        #         if len(starts)>=10:
+        #             for k in range(10):
+        #                 for i in range(now_agent_num):
+        #                     x1.append(starts[k][i][0])
+        #                     y1.append(starts[k][i][1])
+        #                     x2.append(starts[k][i+now_agent_num][0])
+        #                     y2.append(starts[k][i+now_agent_num][1])
+        #                 plt.scatter(x1,y1,c='#0000FF')
+        #                 plt.scatter(x2,y2,c='#A52A2A')
+        #                 x1 = []
+        #                 y1 = []
+        #                 x2 = []
+        #                 y2 = []
+        #                 plt.savefig('/home/chenjy/new_version/select_agent_landmark/select_'+str(j)+'_'+str(k)+'.jpg')
+        #                 plt.clf()
+
+        # for i in range(now_agent_num):
+        #     x1.append(starts_old[-1][i][0])
+        #     y1.append(starts_old[-1][i][1])
+        #     x2.append(starts_old[-1][i+now_agent_num][0])
+        #     y2.append(starts_old[-1][i+now_agent_num][1])
+        # plt.scatter(x1,y1,c='#0000FF')
+        # plt.scatter(x2,y2,c='#A52A2A')
+        # x1 = []
+        # y1 = []
+        # x2 = []
+        # y2 = []
+        # plt.savefig('/home/chenjy/new_version/test_node/test_'+str(j)+'_'+ str(infos_test['n'][0]) +'.jpg')
+        # plt.clf()
 
         if (j % args.save_interval == 0
                 or j == num_updates - 1) and args.save_dir != "":

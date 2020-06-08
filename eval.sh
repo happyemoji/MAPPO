@@ -1,1 +1,2 @@
-CUDA_VISIBLE_DEVICES=5 python PPO_evaluate.py --model_dir '/run4_ratio1_66' --agent_num 16
+# CUDA_VISIBLE_DEVICES=5 python PPO_evaluate.py --env-name "push_ball_origin" --model_dir '/push_ball_211' --adv_num 2 --good_num 1 --landmark_num 1
+CUDA_VISIBLE_DEVICES=5 python PPO_evaluate.py --env-name "simple_spread" --model_dir '/run4_new_reverse_5' --agent_num 4

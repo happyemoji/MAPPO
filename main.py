@@ -65,6 +65,7 @@ def main():
     #                    args.gamma, args.log_dir, device, False)
 
     envs = make_parallel_env(args.env_name, args.num_processes, args.seed, True)
+    # envs = make_vec_envs(args.env_name)
 
     '''
     actor_critic = Policy(
@@ -186,8 +187,10 @@ def main():
                               actor_critic[i].recurrent_hidden_state_size,
                               args.agent_num, i, args.assign_id)
         rollouts.append(rollout)
-
+    start = time.time()
     obs = envs.reset(args.agent_num)
+    end = time.time()
+    print('time: ', end-start)
     # pdb.set_trace()
     if args.assign_id:
         for i in range(args.agent_num):    
@@ -211,7 +214,6 @@ def main():
         args.num_env_steps) // args.num_steps // args.num_processes
     print(num_updates)
     for j in range(num_updates):
-        #pdb.set_trace()
         if args.use_linear_lr_decay:
             # decrease learning rate linearly
             for i in range(args.agent_num):
@@ -243,14 +245,12 @@ def main():
                     one_hot_action[action_list[k][i]] = 1
                     one_env_action.append(one_hot_action)
                 action.append(one_env_action)
-            #start = time.time()
-            #pdb.set_trace()            
+            # pdb.set_trace()
+            # start = time.time()
             obs, reward, done, infos = envs.step(action)
-            #print(reward.max())
-            #if(reward.max()>2):
-            #    import pdb; pdb.set_trace()
-            #end = time.time()
-            #print("step time: ", end-start)
+            # end = time.time()
+            # print('time: ', end-start)
+
             for info in infos:
                 if 'episode' in info.keys():
                     episode_rewards.append(info['episode']['r'])
@@ -286,6 +286,20 @@ def main():
                                 recurrent_hidden_states, action_list[i],
                                 action_log_prob_list[i], value_list[i], torch.tensor(reward[:, i].reshape(-1,1)), masks, bad_masks)
         
+        Cmin = 0.4
+        Cmax = 0.8
+        mid_count = 0
+        easy_count = 0
+        for i in range(len(infos)):
+            if infos[i]['n'][0]>= Cmin and infos[i]['n'][0]<= Cmax:
+                mid_count += 1
+            elif infos[i]['n'][0] > Cmax:
+                easy_count += 1
+        print('mid_num: ', mid_count)
+        print('easy_num: ', easy_count)
+
+
+
         with torch.no_grad():
             next_value_list = []
             for i in range(args.agent_num):

@@ -1,4 +1,3 @@
- # -*- coding: UTF-8 -*-
 import copy
 import glob
 import os
@@ -17,7 +16,7 @@ from a2c_ppo_acktr import algo, utils
 from a2c_ppo_acktr.algo import gail
 from a2c_ppo_acktr.arguments import get_args
 from a2c_ppo_acktr.envs import make_vec_envs
-from a2c_ppo_acktr.model import Policy, ATTBase
+from a2c_ppo_acktr.model import Policy2, ATTBase2
 from a2c_ppo_acktr.distributions import Bernoulli, Categorical, DiagGaussian
 from a2c_ppo_acktr.storage import RolloutStorage
 from evaluation import evaluate
@@ -28,9 +27,7 @@ import pdb
 import random
 import copy
 import matplotlib.pyplot as plt
-
-import os
-os.environ['CUDA_LAUNCH_BLOCKING'] = "1"
+from tensorboardX import SummaryWriter
 
 #env = make_env("simple_spread", discrete_action=True)
 #env.seed(1)
@@ -52,11 +49,13 @@ def make_parallel_env(env_id, n_rollout_threads, seed, discrete_action):
 
 def SampleNearby(starts, N_new, max_step, TB, M):
     starts = starts + []
+    len_start = len(starts)
+    starts_new = []
     if starts==[]:
         return []
     else:
-        while len(starts) < M:
-            st = random.sample(starts,1)[0]
+        for i in range(len_start):
+            st = copy.deepcopy(starts[i])
             s_len = len(st)
             for t in range(TB):
                 for i in range(s_len):
@@ -65,28 +64,36 @@ def SampleNearby(starts, N_new, max_step, TB, M):
                     st[i][0] = st[i][0] + epsilon_x
                     st[i][1] = st[i][1] + epsilon_y
                     # pdb.set_trace()
-                    tmp_epsilon_x = max_step * random.random() #0-0.01
-                    tmp_epsilon_y = max_step * random.random()
+                    # tmp_epsilon_x = max_step * random.random() #0-0.01
+                    # tmp_epsilon_y = max_step * random.random()
+                    # if st[i][0] > 1.0:
+                    #     st[i][0] -= tmp_epsilon_x
+                    # if st[i][0] < -1.0:
+                    #     st[i][0] += tmp_epsilon_x
+                    # if st[i][1] > 1.0:
+                    #     st[i][1] -= tmp_epsilon_y
+                    # if st[i][1] < -1.0:
+                    #     st[i][1] += tmp_epsilon_y
                     if st[i][0] > 1.0:
-                        st[i][0] -= tmp_epsilon_x
+                        st[i][0] = 1.0 - random.random()*0.01
                     if st[i][0] < -1.0:
-                        st[i][0] += tmp_epsilon_x
+                        st[i][0] = -1.0 + random.random()*0.01
                     if st[i][1] > 1.0:
-                        st[i][1] -= tmp_epsilon_y
+                        st[i][1] = 1.0 - random.random()*0.01
                     if st[i][1] < -1.0:
-                        st[i][1] += tmp_epsilon_y
-                starts.append(copy.deepcopy(st))
+                        st[i][1] = -1.0 + random.random()*0.01
+                starts_new.append(copy.deepcopy(st))
                 # starts.append(st)
-            # pdb.set_trace()
-        starts_new = random.sample(starts,N_new)
+        if len(starts_new) <= N_new:
+            starts_new = random.sample(starts_new, len(starts_new))
+        else:
+            starts_new = random.sample(starts_new, N_new)
         return starts_new
-
-
 
 
 def main():
     args = get_args()
-
+    model_dir = args.model_dir + '_' + str(args.adv_num) + str(args.good_num) + str(args.landmark_num)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed_all(args.seed)
 
@@ -100,58 +107,45 @@ def main():
     utils.cleanup_log_dir(eval_log_dir)
 
     torch.set_num_threads(1)
-    device = torch.device("cuda:0" if args.cuda else "cpu")
-
-    #envs = make_vec_envs(args.env_name, args.seed, args.num_processes,
-    #                    args.gamma, args.log_dir, device, False)
+    device = torch.device("cuda" if args.cuda else "cpu")
 
     envs = make_parallel_env(args.env_name, args.num_processes, args.seed, True)
-
-    '''
-    actor_critic = Policy(
-        envs.observation_space[0].shape,
-        envs.action_space[0],
-        agent_num=args.agent_num, 
-        base_kwargs={'recurrent': args.recurrent_policy})
-    actor_critic.to(device)
-    '''
     actor_critic = []
-    # for i in range(args.agent_num):
-    #     # actor_critic, ob_rms = torch.load('/home/chenjy/new_version/trained_models/ppo' + args.model_dir + '/agent_%i' % (i+1) + ".pt")
-    #     ac, ob_rms = torch.load('/home/chenjy/new_version/trained_models/ppo/run4_reverse_3'  + '/agent_1' + ".pt")
-    #     ac.to(device)
-    #     actor_critic.append(ac)
+    now_agent_num = args.adv_num
     if args.share_policy:
         if args.use_attention:
-            share_base = ATTBase(envs.observation_space[0].shape[0], args.agent_num)
+            share_base = ATTBase2(envs.observation_space[0].shape[0], hidden_size=100)
             share_dist = Categorical(share_base.output_size, envs.action_space[0].n)
-            for i in range(args.agent_num):
-                ac = Policy(
+            for i in range(args.adv_num):
+                ac = Policy2(
                     envs.observation_space[0].shape,
                     envs.action_space[0],
-                    agent_num=args.agent_num, 
+                    agent_num=args.adv_num, 
                     agent_i=i,
                     base=share_base,
                     dist=share_dist,
-                    base_kwargs={'recurrent': args.recurrent_policy})
+                    base_kwargs={'recurrent': args.recurrent_policy},
+                    adv_num=args.adv_num, 
+                    good_num=args.good_num,
+                    landmark_num=args.landmark_num)
                 ac.to(device)
                 actor_critic.append(ac)
         else:
-            ac = Policy(
+            ac = Policy2(
                     envs.observation_space[0].shape,
                     envs.action_space[0],
-                    agent_num=args.agent_num, 
+                    agent_num=args.adv_num, 
                     agent_i=0,
                     base_kwargs={'recurrent': args.recurrent_policy, 'assign_id': args.assign_id})
             ac.to(device)
-            for i in range(args.agent_num):
+            for i in range(args.adv_num):
                 actor_critic.append(ac)
     else:
-        for i in range(args.agent_num):
-            ac = Policy(
+        for i in range(args.adv_num):
+            ac = Policy2(
                 envs.observation_space[0].shape,
                 envs.action_space[0],
-                agent_num=args.agent_num, 
+                agent_num=args.adv_num, 
                 agent_i=i,
                 base_kwargs={'recurrent': args.recurrent_policy})
             ac.to(device)
@@ -168,20 +162,8 @@ def main():
             alpha=args.alpha,
             max_grad_norm=args.max_grad_norm)
     elif args.algo == 'ppo':
-        '''
-        agent = algo.PPO(
-            actor_critic,
-            args.clip_param,
-            args.ppo_epoch,
-            args.num_mini_batch,
-            args.value_loss_coef,
-            args.entropy_coef,
-            lr=args.lr,
-            eps=args.eps,
-            max_grad_norm=args.max_grad_norm)
-        '''
         agent = []
-        for i in range(args.agent_num):
+        for i in range(args.adv_num):
             agent.append(algo.PPO(
                 actor_critic[i],
                 i,
@@ -193,7 +175,7 @@ def main():
                 lr=args.lr,
                 eps=args.eps,
                 max_grad_norm=args.max_grad_norm,
-                model_dir = args.model_dir))
+                model_dir = model_dir))
     elif args.algo == 'acktr':
         agent = algo.A2C_ACKTR(
             actor_critic, args.value_loss_coef, args.entropy_coef, acktr=True)
@@ -215,88 +197,95 @@ def main():
             batch_size=args.gail_batch_size,
             shuffle=True,
             drop_last=drop_last)
-    '''   
-    rollouts = RolloutStorage(args.num_steps, args.num_processes,
-                              envs.observation_space[0].shape, envs.action_space[0],
-                              actor_critic.recurrent_hidden_state_size)
-
-    obs = envs.reset()
-    rollouts.obs[0].copy_(torch.tensor(obs[:,0,:]))
-    rollouts.to(device)
-    '''
-
-    # rollouts = []
-    # for i in range(args.agent_num):
-    #     rollout = RolloutStorage(args.num_steps, args.num_processes,
-    #                           envs.observation_space[0].shape, envs.action_space[0],
-    #                           actor_critic[i].recurrent_hidden_state_size,
-    #                           args.agent_num, i, args.assign_id)
-    #     rollouts.append(rollout)
-
         
     episode_rewards = deque(maxlen=10)
-
     num_updates = int(
         args.num_env_steps) // args.num_steps // args.num_processes
-    print(num_updates)
-
-    now_agent_num = args.agent_num
+    
     ratio = 1
     # 给定初始的状态分布
     starts = []
+    select_starts = []
     starts_old = []
     buffer_length = 10000
     curri = 0
-    N_new = 1000
-    N_old = 500
-    max_step = 0.2
+    # N_new = 1000
+    N_new = 50
+    N_old = 650
+    max_step = 0.1
     TB = 1
-    M = 10000
-    Rmin = 0.1
-    Rmax = 0.7
-    Cmin = 0.6
+    M = 10000  
+    Rmin = 0.2
+    Rmax = 0.6
+    Cmin = 0.0
     Cmax = 0.8
+    fix_iter = 50 # 保证经过fix_iter之后，再向外扩
+    count_fix = 0 # 在fixed集合上train了几个回合
+    proportion = 2.0 # >1时代表N_new和N_old比例不变
     one_starts_landmark = []
-    one_starts_agent = []
-    for j in range(N_new):
-        for i in range(now_agent_num):
+    one_starts_good_agent = []
+    one_starts_adv_agent = []
+    for j in range(args.num_processes):
+        for i in range(args.landmark_num):
             landmark_location = np.random.uniform(-1, +1, 2) 
             one_starts_landmark.append(copy.deepcopy(landmark_location))
-        index_sample = BatchSampler(SubsetRandomSampler(range(now_agent_num)),now_agent_num,drop_last=True)
+        index_sample = BatchSampler(SubsetRandomSampler(range(args.landmark_num)),args.landmark_num, drop_last=True)
         for indices in index_sample:
             for k in indices:
-                one_starts_agent.append(copy.deepcopy(one_starts_landmark[k]+0.01))
+                one_starts_good_agent.append(copy.deepcopy(one_starts_landmark[k]+0.01))
+        for i in range(args.adv_num):
+            # 两个agent分别在球的两端
+            if i % 2 == 0:
+                one_starts_adv_agent.append(copy.deepcopy(one_starts_good_agent[int(i/2)]+0.25))
+            else:
+                one_starts_adv_agent.append(copy.deepcopy(one_starts_good_agent[int(i/2)]-0.25))
         # pdb.set_trace()
-        starts.append(one_starts_agent+one_starts_landmark)
-        starts_old.append(one_starts_agent+one_starts_landmark)
-        one_starts_agent = []
+        select_starts.append(one_starts_adv_agent + one_starts_good_agent + one_starts_landmark)
+        starts_old.append(one_starts_adv_agent + one_starts_good_agent + one_starts_landmark)
+        one_starts_good_agent = []
+        one_starts_adv_agent = []
         one_starts_landmark = []
-    curri = len(starts_old)
-    # 此处agent和哪个landmark对应是随机的，每次随机是确定的
-    # pdb.set_trace()
-    x1 = []
-    y1 = []
-    x2 = []
-    y2 = []
     
+
+    # samplenearby需要改，初始状态的设置需要改，new_starts_obs需要改
     for j in range(num_updates):
-        starts = SampleNearby(starts, N_new, max_step, TB, M)
-        starts = starts + random.sample(list(starts_old), N_old)
-        sample_index = random.sample(range(len(starts)), args.num_processes)# 从good starts中无放回取出500个送入环境
-        # 再从starts生成obs
-        obs, rou_index= envs.new_starts_obs(starts, sample_index, now_agent_num)# 需要在starts中剔除不合适的点
-        print("now_agent_num: ", now_agent_num)
+        #pdb.set_trace()
+        if count_fix == fix_iter:
+            starts = copy.deepcopy(select_starts)
+            newsample_starts = SampleNearby(starts, N_new, max_step, TB, M)
+            # N_old保持小于args.num_processes
+            index_old = random.sample(range(len(starts_old)),N_old)
+            if len(newsample_starts)< args.num_processes-len(index_old): # 说明扩展出来的很少/select的很少
+                index_new = random.sample(range(len(newsample_starts)), len(newsample_starts))
+                index_old = random.sample(range(len(starts_old)), args.num_processes-len(index_new))
+            else:
+                index_new = random.sample(range(len(newsample_starts)), args.num_processes-len(index_old))
+            # index_old.sort()
+            starts = []
+            print('new_node: ', len(index_new))
+            print('old_node: ', len(index_old))
+            for i in range(len(index_new)):
+                starts.append(copy.deepcopy(newsample_starts[index_new[i]]))
+            for i in range(len(index_old)):
+                starts.append(copy.deepcopy(starts_old[index_old[i]]))
+        else:
+            starts = []
+            index_old = random.sample(range(len(starts_old)), args.num_processes)
+            for i in range(len(index_old)):
+                starts.append(copy.deepcopy(starts_old[index_old[i]]))
+        obs = envs.new_starts_obs(starts, now_agent_num)
+
+        # obs = envs.reset(now_agent_num)  #[num_process[n_agents[obs_dim]]]
         rollouts = []
-        for i in range(now_agent_num):
+        for i in range(args.adv_num):
             rollout = RolloutStorage(args.num_steps, args.num_processes,
-                                  envs.observation_space[0].shape, envs.action_space[0],
-                                  actor_critic[i].recurrent_hidden_state_size,
-                                  now_agent_num, i, args.assign_id)
+                              envs.observation_space[0].shape, envs.action_space[0],
+                              actor_critic[i].recurrent_hidden_state_size,
+                              args.adv_num, i, args.assign_id)
             rollouts.append(rollout)
-        # obs = envs.reset()
         if args.assign_id:
-            for i in range(now_agent_num):    
-                vec_id = np.zeros((args.num_processes, now_agent_num))
+            for i in range(args.adv_num):    
+                vec_id = np.zeros((args.num_processes, args.adv_num))
                 vec_id[:, i] = 1
                 vec_id = torch.tensor(vec_id)
                 as_obs = torch.tensor(obs.reshape(args.num_processes, -1))
@@ -304,21 +293,15 @@ def main():
                 rollouts[i].share_obs[0].copy_(torch.cat((as_obs, vec_id),1))
                 rollouts[i].obs[0].copy_(torch.cat((a_obs, vec_id),1))
                 rollouts[i].to(device)
-
         else:
-            for i in range(now_agent_num):
-                # pdb.set_trace()
+            for i in range(args.adv_num):
                 rollouts[i].share_obs[0].copy_(torch.tensor(obs.reshape(args.num_processes, -1)))
                 rollouts[i].obs[0].copy_(torch.tensor(obs[:,i,:]))
                 rollouts[i].to(device)
-        #pdb.set_trace()
-        # 保证参与训练的所有agent参数一致
-        # for i in range(now_agent_num):
-        #     agent[i] = agent[0]
 
         if args.use_linear_lr_decay:
             # decrease learning rate linearly
-            for i in range(now_agent_num):
+            for i in range(args.adv_num):
                 utils.update_linear_schedule(
                     agent[i].optimizer, j, num_updates,
                     agent[i].optimizer.lr if args.algo == "acktr" else args.lr)
@@ -327,33 +310,39 @@ def main():
             # Sample actions
             value_list, action_list, action_log_prob_list, recurrent_hidden_states_list = [], [], [], []
             with torch.no_grad():
-                for i in range(now_agent_num):
+                for i in range(args.adv_num):
                     #pdb.set_trace()
                     value, action, action_log_prob, recurrent_hidden_states = actor_critic[i].act(
                         rollouts[i].share_obs[step],
-                        rollouts[i].obs[step], now_agent_num, rollouts[i].recurrent_hidden_states[step],
+                        rollouts[i].obs[step], args.adv_num, rollouts[i].recurrent_hidden_states[step],
                         rollouts[i].masks[step])
                     #import pdb; pdb.set_trace()
                     value_list.append(value)
                     action_list.append(action)
                     action_log_prob_list.append(action_log_prob)
                     recurrent_hidden_states_list.append(recurrent_hidden_states)
+                
             # Obser reward and next obs
             action = []
             for i in range(args.num_processes):
                 one_env_action = []
-                for k in range(now_agent_num):
+                for k in range(args.adv_num):
                     one_hot_action = np.zeros(envs.action_space[0].n)
                     one_hot_action[action_list[k][i]] = 1
                     one_env_action.append(one_hot_action)
                 action.append(one_env_action)
-         
+            #start = time.time()
             obs, reward, done, infos = envs.step(action)
+            #print(step,reward)
 
-
-            for info in infos:
-                if 'episode' in info.keys():
-                    episode_rewards.append(info['episode']['r'])
+            #print(reward.max())
+            #if(reward.max()>2):
+            #    import pdb; pdb.set_trace()
+            #end = time.time()
+            #print("step time: ", end-start)
+            # for info in infos:
+            #     if 'episode' in info.keys():
+            #         episode_rewards.append(info['episode']['r'])
 
             # If done then clean the history of observations.
             '''
@@ -371,8 +360,8 @@ def main():
             '''
             #import pdb; pdb.set_trace()
             if args.assign_id:
-                for i in range(now_agent_num):
-                    vec_id = np.zeros((args.num_processes, now_agent_num))
+                for i in range(args.adv_num):
+                    vec_id = np.zeros((args.num_processes, args.adv_num))
                     vec_id[:, i] = 1
                     vec_id = torch.tensor(vec_id)
                     as_obs = torch.tensor(obs.reshape(args.num_processes, -1))
@@ -381,17 +370,78 @@ def main():
                                 recurrent_hidden_states, action_list[i],
                                 action_log_prob_list[i], value_list[i], torch.tensor(reward[:, i].reshape(-1,1)), masks, bad_masks)
             else:
-                for i in range(now_agent_num):
+                for i in range(args.adv_num):
                     rollouts[i].insert(torch.tensor(obs.reshape(args.num_processes, -1)), torch.tensor(obs[:,i,:]), 
                                 recurrent_hidden_states, action_list[i],
                                 action_log_prob_list[i], value_list[i], torch.tensor(reward[:, i].reshape(-1,1)), masks, bad_masks)
-        
+
+        if count_fix == fix_iter:
+            count_fix = 0
+            select_starts = [] 
+            add_starts = []
+            easy_count = 0
+            del_count = 0
+            index_old = np.array(index_old)
+            for i in range(len(infos)):
+                if infos[i][0]>= Cmin and infos[i][0]<= Cmax:
+                    if i < len(index_new):
+                        select_starts.append(copy.deepcopy(starts[i]))
+                        add_starts.append(copy.deepcopy(starts[i]))
+                    else:
+                        select_starts.append(copy.deepcopy(starts[i]))
+                elif infos[i][0] > Cmax:
+                    easy_count += 1
+                    # 此处需要区分是不是从old中来的点，如果是，需要清除
+                    # if i >= len(index_new):
+                    #     del starts_old[index_old[i-len(index_new)]]
+                    #     del_count += 1
+                    #     index_old = index_old - 1 
+            print('select_num: ', len(select_starts))
+            print('add_num: ', len(add_starts))
+            print('easy_num: ', easy_count)
+            # print('del_num: ', del_count)
+
+            if len(starts_old) < buffer_length:
+                starts_old = starts_old + add_starts
+                curri = len(starts_old)-1
+            else:
+                starts_old = starts_old[len(add_starts):] + add_starts
+        else:
+            count_fix += 1
+            mid_count = 0
+            easy_count = 0
+            for i in range(len(infos)):
+                if infos[i][0]>= Cmin and infos[i][0]<= Cmax:
+                    mid_count += 1
+                    # print("mid_reward: ", reward[i])
+                    # print("mid_mean_reward: ", rollouts[0].rewards.mean(axis=0)[i])
+                elif infos[i][0] > Cmax:
+                    easy_count += 1
+                    # print("easy_reward: ", reward[i])
+                    # print("easy_mean_reward: ", rollouts[0].rewards.mean(axis=0)[i])
+                    # 此处需要区分是不是从old中来的点，如果是，需要清除
+                    # if i >= len(index_new):
+                    #     del starts_old[index_old[i-len(index_new)]]
+                    #     del_count += 1
+                    #     index_old = index_old - 1 
+            print('mid_num: ', mid_count)
+            print('easy_num: ', easy_count)
+            if count_fix == fix_iter:
+                if easy_count/args.num_processes > proportion:
+                    N_new = N_new + 50
+                    if N_new > args.num_processes:
+                        N_new = args.num_processes
+                    N_old = args.num_processes - N_new
+        print('count_fix: ', count_fix)
+        print('old_length: ', len(starts_old))
+        print('##############################')
+
         with torch.no_grad():
             next_value_list = []
-            for i in range(now_agent_num):
+            for i in range(args.adv_num):
                 next_value = actor_critic[i].get_value(
                     rollouts[i].share_obs[-1],
-                    rollouts[i].obs[-1], now_agent_num, rollouts[i].recurrent_hidden_states[-1],
+                    rollouts[i].obs[-1], args.adv_num, rollouts[i].recurrent_hidden_states[-1],
                     rollouts[i].masks[-1]).detach()
                 next_value_list.append(next_value)
 
@@ -411,87 +461,29 @@ def main():
                     rollouts.obs[step], rollouts.actions[step], args.gamma,
                     rollouts.masks[step])
         
-        for i in range(now_agent_num):
+        for i in range(args.adv_num):
             rollouts[i].compute_returns(next_value_list[i], args.use_gae, args.gamma,
                                     args.gae_lambda, args.use_proper_time_limits)
 
-        for i in range(now_agent_num):
-            value_loss, action_loss, dist_entropy = agent[i].update(rollouts[i], now_agent_num)
+        for i in range(args.adv_num):
+            value_loss, action_loss, dist_entropy = agent[i].update(rollouts[i], args.adv_num)
             #import pdb; pdb.set_trace()
             if (i == 0 and (j+1)%10 == 0):
                 print("update num: " + str(j+1) + " value loss: " + str(value_loss))
-        # print('rollouts.rewards: ', rollouts[0].rewards.shape)
+        #rollouts.after_update()
 
-        # select starts using Rew
-        # Rew = rollouts[0].rewards.mean(axis=0)
-        # starts_tmp = [] 
-        # for i in range(len(Rew)):
-        #     if Rew[i]>= Rmin and Rew[i]<= Rmax:
-        #         starts_tmp.append(copy.deepcopy(starts[rou_index[i]]))
-        # starts = copy.deepcopy(starts_tmp)
-
-        # select starts using coverage rate
-        starts_tmp = [] 
-        for i in range(len(infos)):
-            if infos[i]['n'][0]>= Cmin and infos[i]['n'][0]<= Cmax:
-                starts_tmp.append(copy.deepcopy(starts[rou_index[i]]))
-        starts = copy.deepcopy(starts_tmp)
-
-        if len(starts_old) < buffer_length:
-            starts_old = starts_old + starts
-            curri = len(starts_old)-1
-        else:
-            starts_old = np.roll(starts_old,len(starts))
-            starts_old[0:len(starts)] = copy.deepcopy(starts)
-
-        # if starts!=[]:
-        #     if len(starts)>=1:
-        #         for i in range(now_agent_num):
-        #             x1.append(starts[0][i][0])
-        #             y1.append(starts[0][i][1])
-        #             x2.append(starts[0][i+now_agent_num][0])
-        #             y2.append(starts[0][i+now_agent_num][1])
-        # plt.scatter(x1,y1,c='#0000FF')
-        # plt.scatter(x2,y2,c='#A52A2A')
-        # x1 = []
-        # y1 = []
-        # x2 = []
-        # y2 = []
-        # if j % 1 == 0 :
-        #     plt.savefig('/home/chenjy/new_version/select_agent_landmark/test_'+str(j)+'.jpg')
-        #     plt.clf()
-
+        # save for every interval-th episode or for the last epoch     
+        #pdb.set_trace()   
         if (j % args.save_interval == 0
                 or j == num_updates - 1) and args.save_dir != "":
             save_path = os.path.join(args.save_dir, args.algo)
-            if not os.path.exists(save_path + args.model_dir):
-                os.makedirs(save_path + args.model_dir)
-            # 存储agent数最大值的参数
-            for i in range(now_agent_num):
+            if not os.path.exists(save_path + model_dir):
+                os.makedirs(save_path + model_dir)
+            for i in range(args.adv_num):
                 torch.save([
                     actor_critic[i],
                     getattr(utils.get_vec_normalize(envs), 'ob_rms', None)
-                ], save_path + args.model_dir + '/agent_%i' % (i+1) + ".pt")
-        '''
-        if j % args.log_interval == 0 and len(episode_rewards) > 1:
-            total_num_steps = (j + 1) * args.num_processes * args.num_steps
-            end = time.time()
-            print(
-                "Updates {}, num timesteps {}, FPS {} \n Last {} training episodes: mean/median reward {:.1f}/{:.1f}, min/max reward {:.1f}/{:.1f}\n"
-                .format(j, total_num_steps,
-                        int(total_num_steps / (end - start)),
-                        len(episode_rewards), np.mean(episode_rewards),
-                        np.median(episode_rewards), np.min(episode_rewards),
-                        np.max(episode_rewards), dist_entropy, value_loss,
-                        action_loss))
-        '''
-        '''
-        if (args.eval_interval is not None and len(episode_rewards) > 1
-                and j % args.eval_interval == 0):
-            ob_rms = utils.get_vec_normalize(envs).ob_rms
-            evaluate(actor_critic, ob_rms, args.env_name, args.seed,
-                     args.num_processes, eval_log_dir, device)
-        '''
+                ], save_path + model_dir + '/agent_%i' % (i+1) + ".pt")
 
 if __name__ == "__main__":
     main()

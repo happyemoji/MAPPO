@@ -43,6 +43,6 @@ def make_env(scenario_name, benchmark=False, discrete_action=False):
                             discrete_action=discrete_action)
     else:
         env = MultiAgentEnv(world, scenario.reset_world, scenario.reward,
-                            scenario.observation,
+                            scenario.observation, scenario.info_coverage_rate, scenario.share_reward,
                             discrete_action=discrete_action)
     return env

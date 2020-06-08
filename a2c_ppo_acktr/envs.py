@@ -29,61 +29,99 @@ except ImportError:
     pass
 
 
-def make_env(env_id, seed, rank, log_dir, allow_early_resets):
-    def _thunk():
-        if env_id.startswith("dm"):
-            _, domain, task = env_id.split('.')
-            env = dm_control2gym.make(domain_name=domain, task_name=task)
-        else:
-            env = gym.make(env_id)
+def make_env(scenario_name, benchmark=False, discrete_action=False):
+    '''
+    Creates a MultiAgentEnv object as env. This can be used similar to a gym
+    environment by calling env.reset() and env.step().
+    Use env.render() to view the environment on the screen.
 
-        is_atari = hasattr(gym.envs, 'atari') and isinstance(
-            env.unwrapped, gym.envs.atari.atari_env.AtariEnv)
-        if is_atari:
-            env = make_atari(env_id)
+    Input:
+        scenario_name   :   name of the scenario from ./scenarios/ to be Returns
+                            (without the .py extension)
+        benchmark       :   whether you want to produce benchmarking data
+                            (usually only done during evaluation)
 
-        env.seed(seed + rank)
+    Some useful env properties (see environment.py):
+        .observation_space  :   Returns the observation space for each agent
+        .action_space       :   Returns the action space for each agent
+        .n                  :   Returns the number of Agents
+    '''
+    from multiagent.environment import MultiAgentEnv
+    import multiagent.scenarios as scenarios
 
-        if str(env.__class__.__name__).find('TimeLimit') >= 0:
-            env = TimeLimitMask(env)
+    # load scenario from script
+    scenario = scenarios.load(scenario_name + ".py").Scenario()
+    # create world
+    world = scenario.make_world()
+    # create multiagent environment
+    if benchmark:        
+        env = MultiAgentEnv(world, scenario.reset_world, scenario.reward,
+                            scenario.observation, scenario.benchmark_data,
+                            discrete_action=discrete_action)
+    else:
+        env = MultiAgentEnv(world, scenario.reset_world, scenario.reward,
+                            scenario.observation, scenario.info_coverage_rate, scenario.share_reward,
+                            discrete_action=discrete_action)
+    return env
 
-        if log_dir is not None:
-            env = bench.Monitor(
-                env,
-                os.path.join(log_dir, str(rank)),
-                allow_early_resets=allow_early_resets)
+# def make_env(env_id, seed, rank, log_dir, allow_early_resets):
+#     def _thunk():
+#         if env_id.startswith("dm"):
+#             _, domain, task = env_id.split('.')
+#             env = dm_control2gym.make(domain_name=domain, task_name=task)
+#         else:
+#             env = gym.make(env_id)
 
-        if is_atari:
-            if len(env.observation_space.shape) == 3:
-                env = wrap_deepmind(env)
-        elif len(env.observation_space.shape) == 3:
-            raise NotImplementedError(
-                "CNN models work only for atari,\n"
-                "please use a custom wrapper for a custom pixel input env.\n"
-                "See wrap_deepmind for an example.")
+#         is_atari = hasattr(gym.envs, 'atari') and isinstance(
+#             env.unwrapped, gym.envs.atari.atari_env.AtariEnv)
+#         if is_atari:
+#             env = make_atari(env_id)
 
-        # If the input has shape (W,H,3), wrap for PyTorch convolutions
-        obs_shape = env.observation_space.shape
-        if len(obs_shape) == 3 and obs_shape[2] in [1, 3]:
-            env = TransposeImage(env, op=[2, 0, 1])
+#         env.seed(seed + rank)
 
-        return env
+#         if str(env.__class__.__name__).find('TimeLimit') >= 0:
+#             env = TimeLimitMask(env)
 
-    return _thunk
+#         if log_dir is not None:
+#             env = bench.Monitor(
+#                 env,
+#                 os.path.join(log_dir, str(rank)),
+#                 allow_early_resets=allow_early_resets)
 
+#         if is_atari:
+#             if len(env.observation_space.shape) == 3:
+#                 env = wrap_deepmind(env)
+#         elif len(env.observation_space.shape) == 3:
+#             raise NotImplementedError(
+#                 "CNN models work only for atari,\n"
+#                 "please use a custom wrapper for a custom pixel input env.\n"
+#                 "See wrap_deepmind for an example.")
+
+#         # If the input has shape (W,H,3), wrap for PyTorch convolutions
+#         obs_shape = env.observation_space.shape
+#         if len(obs_shape) == 3 and obs_shape[2] in [1, 3]:
+#             env = TransposeImage(env, op=[2, 0, 1])
+
+#         return env
+
+#     return _thunk
+import pdb
 
 def make_vec_envs(env_name,
                   seed,
                   num_processes,
+                  discrete_action,
                   gamma,
-                  log_dir,
                   device,
-                  allow_early_resets,
                   num_frame_stack=None):
-    envs = [
-        make_env(env_name, seed, i, log_dir, allow_early_resets)
-        for i in range(num_processes)
-    ]
+    def get_env_fn(rank):
+        env = make_env(env_name, discrete_action=discrete_action)
+        # pdb.set_trace()
+        env.seed(seed + rank * 1000)
+        np.random.seed(seed + rank * 1000)
+        return env
+
+    envs = [get_env_fn(i) for i in range(num_processes)]
 
     if len(envs) > 1:
         envs = ShmemVecEnv(envs, context='fork')

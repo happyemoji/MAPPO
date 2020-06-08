@@ -106,9 +106,9 @@ class PPO():
                     {'action_loss': action_loss},
                     self.training_step)
                 #print("agent num: ", self.agent_i, " value_loss: ", value_loss)
-                if((self.training_step+1) % 100 == 0 and self.agent_i == 0):
-                    print("training_steps: " + str(self.training_step+1) + " mean rewards: " + str(rollouts.rewards.mean()))
-
+                # if((self.training_step+1) % 100 == 0 and self.agent_i == 0):
+                #     print("training_steps: " + str(self.training_step+1) + " mean rewards: " + str(rollouts.rewards.mean()))
+        # import pdb;pdb.set_trace()
         num_updates = self.ppo_epoch * self.num_mini_batch
         value_loss_epoch /= num_updates
         action_loss_epoch /= num_updates

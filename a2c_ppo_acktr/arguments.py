@@ -156,6 +156,21 @@ def get_args():
         type=int,
         default=3,
         help='number of agent num (default: 3)')
+    parser.add_argument(
+        '--adv_num',
+        type=int,
+        default=3,
+        help='number of adversary agent num (default: 3)')
+    parser.add_argument(
+        '--good_num',
+        type=int,
+        default=1,
+        help='number of good agent num (default: 3)')
+    parser.add_argument(
+        '--landmark_num',
+        type=int,
+        default=0,
+        help='number of agent num (default: 3)')
     ### share policy
     parser.add_argument(
         '--share_policy',

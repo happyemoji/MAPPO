@@ -2,7 +2,7 @@
 Modified from OpenAI Baselines code to work with multi-agent envs
 """
 import numpy as np
-from multiprocessing import Process, Pipe
+from multiprocessing import Process, Pipe, Manager
 from baselines.common.vec_env import VecEnv, CloudpickleWrapper
 
 
@@ -15,18 +15,17 @@ def worker(remote, parent_remote, env_fn_wrapper):
             # import time; start = time.time()
             ob, reward, done, info = env.step(data)
             # end = time.time()
-            # if end-start > 0.7:
-            #     print('********')
-            # print('one_step: ',end-start)
+            # print('step: ',end-start)
             if all(done):
                 ob = env.reset()
             remote.send((ob, reward, done, info))
         elif cmd[0] == 'new_starts_obs':
             now_agent_num = cmd[1]
             starts = cmd[2]
-            index_index = cmd[3]
-            ob = env.new_starts_obs(starts,now_agent_num,index_index)
-            remote.send(ob)
+            sample_index = cmd[3]
+            index_index = cmd[4]
+            ob, rou_index= env.new_starts_obs(starts,now_agent_num,index_index,sample_index)
+            remote.send((ob,rou_index))
         elif cmd[0:5] == 'reset':
             now_agent_num = int(cmd[5:])
             ob = env.reset(now_agent_num)
@@ -60,6 +59,8 @@ class SubprocVecEnv(VecEnv):
         self.waiting = False
         self.closed = False
         nenvs = len(env_fns)
+        self.actions_manager = Manager().list()
+        self.actions_judge = Manager().list()
         self.remotes, self.work_remotes = zip(*[Pipe() for _ in range(nenvs)])
         self.ps = [Process(target=worker, args=(work_remote, remote, CloudpickleWrapper(env_fn)))
             for (work_remote, remote, env_fn) in zip(self.work_remotes, self.remotes, env_fns)]
@@ -76,32 +77,22 @@ class SubprocVecEnv(VecEnv):
         self.length = len(env_fns)
         VecEnv.__init__(self, self.length, observation_space, action_space)
 
-    def step_async(self, actions,now_num_processes):
-        # import time; 
-        # start = time.time()
-        i = 0
-        for remote, action in zip(self.remotes, actions):
-            # import pdb; pdb.set_trace()
-            if i < now_num_processes:
-                remote.send(('step', action))
-                i += 1
-        # end = time.time()
-        # print('time_send: ',end-start)
-        self.waiting = True
+    def step_async(self,actions):
+        # 把actions填到共享内存中，需要保证所有env都采集完成
+        while True in self.actions_judge:
+            #阻塞
+        for i in range(len(actions)):
+            self.actions_manager[i] = actions[i]
+        for i in range(len(actions)):
+            self.actions_judge[i] = True
 
-    def step_wait(self,now_num_processes):
-        # import time; start = time.time()
-        results = []
-        i = 0
-        for remote in self.remotes:
-            if i < now_num_processes:
-                results.append(remote.recv())
-                i += 1
-        # results = [remote.recv() for remote in self.remotes]
+    def step_wait(self):
+        import time; start = time.time()
+        results = [remote.recv() for remote in self.remotes]
         self.waiting = False
         obs, rews, dones, infos = zip(*results)
-        # end = time.time()
-        # print('time_get: ',end-start)
+        end = time.time()
+        print('time_get: ',end-start)
         return np.stack(obs), np.stack(rews), np.stack(dones), infos
 
     # def reset(self):
@@ -109,41 +100,24 @@ class SubprocVecEnv(VecEnv):
     #         remote.send(('reset', None))
     #     return np.stack([remote.recv() for remote in self.remotes])
 
-    def new_starts_obs(self, starts, now_agent_num, now_num_processes):
-        tmp_list = ['new_starts_obs', now_agent_num, starts]
-        i = 0
-        results = []
-        for remote in self.remotes:
-            if i < now_num_processes:
-                index_index = [i]
-                remote.send((tmp_list + index_index, None))
-                i += 1
+    def new_starts_obs(self, starts, sample_index, now_agent_num):
+        self.new_starts_obs_async(starts, sample_index, now_agent_num)
+        return self.new_starts_obs_wait()
+
+    def new_starts_obs_async(self, starts, sample_index, now_agent_num):
+        tmp_list = ['new_starts_obs', now_agent_num, starts, sample_index]
         i = 0
         for remote in self.remotes:
-            if i < now_num_processes:
-                results.append(remote.recv())
-                i += 1
-        return np.stack(results)
+            index_index = [i] # sample_index的index
+            remote.send((tmp_list + index_index, None))
+            i += 1
+        self.waiting = True
 
-    # using by main_reverse 
-    # def new_starts_obs(self, starts, now_agent_num):
-    #     self.new_starts_obs_async(starts, sample_index, now_agent_num)
-    #     return self.new_starts_obs_wait()
-
-    # def new_starts_obs_async(self, starts, sample_index, now_agent_num):
-    #     tmp_list = ['new_starts_obs', now_agent_num, starts, sample_index]
-    #     i = 0
-    #     for remote in self.remotes:
-    #         index_index = [i] # sample_index的index
-    #         remote.send((tmp_list + index_index, None))
-    #         i += 1
-    #     self.waiting = True
-
-    # def new_starts_obs_wait(self):
-    #     results = [remote.recv() for remote in self.remotes]
-    #     self.waiting = False
-    #     obs, rou_index = zip(*results)
-    #     return np.stack(obs), np.stack(rou_index)
+    def new_starts_obs_wait(self):
+        results = [remote.recv() for remote in self.remotes]
+        self.waiting = False
+        obs, rou_index = zip(*results)
+        return np.stack(obs), np.stack(rou_index)
 
     def init_set(self, now_agent_num, ratio):
         hard_num = int(self.length * ratio)

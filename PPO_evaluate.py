@@ -22,36 +22,15 @@ import imageio
 from a2c_ppo_acktr.arguments import get_args
 import pdb
 import time
+from torch.utils.data.sampler import BatchSampler, SubsetRandomSampler
+import copy
+import random
 
 # Parameters
 gamma = 0.95
 render = False
-seed = 1
+seed = 0
 log_interval = 10
-
-env = make_env("simple_spread", discrete_action=True)
-num_state = env.observation_space[0].shape[0]
-num_action = env.action_space[0].n
-#torch.manual_seed(seed)
-#env.seed(seed)
-Transition = namedtuple('Transition', ['state', 'action',  'a_log_prob', 'reward', 'next_state'])
-
-class Actor(nn.Module):
-    def __init__(self):
-        super(Actor, self).__init__()
-        self.fc1 = nn.Linear(num_state, 100)
-        self.action_head = nn.Linear(100, num_action)
-
-    def forward(self, x):
-        x = F.relu(self.fc1(x))
-        action_prob = F.softmax(self.action_head(x), dim=1)
-        return action_prob
-
-def is_collision(agent1, agent2):
-    delta_pos = agent1.state.p_pos - agent2.state.p_pos
-    dist = np.sqrt(np.sum(np.square(delta_pos)))
-    dist_min = agent1.size + agent2.size
-    return True if dist < dist_min else False
 
 # def num_reach(world):
 #     num = 0
@@ -68,6 +47,37 @@ def num_reach(world):
             num = num + 1
     return num 
 
+def SampleNearby(starts, N_new, max_step, TB, M):
+    starts = starts + []
+    if starts==[]:
+        return []
+    else:
+        while len(starts) < M:
+            st = random.sample(starts,1)[0]
+            s_len = len(st)
+            for t in range(TB):
+                for i in range(s_len):
+                    epsilon_x = -2 * max_step * random.random() + max_step
+                    epsilon_y = -2 * max_step * random.random() + max_step
+                    st[i][0] = st[i][0] + epsilon_x
+                    st[i][1] = st[i][1] + epsilon_y
+                    # pdb.set_trace()
+                    tmp_epsilon_x = max_step * random.random() #0-0.01
+                    tmp_epsilon_y = max_step * random.random()
+                    if st[i][0] > 1.0:
+                        st[i][0] -= tmp_epsilon_x
+                    if st[i][0] < -1.0:
+                        st[i][0] += tmp_epsilon_x
+                    if st[i][1] > 1.0:
+                        st[i][1] -= tmp_epsilon_y
+                    if st[i][1] < -1.0:
+                        st[i][1] += tmp_epsilon_y
+                starts.append(copy.deepcopy(st))
+                # starts.append(st)
+            # pdb.set_trace()
+        starts_new = random.sample(starts,N_new)
+        return starts_new
+
 if __name__ == '__main__':
     ### 手动加agent
     # agent1 = Actor()
@@ -76,11 +86,14 @@ if __name__ == '__main__':
     # agent4 = Actor()
     # agent5 = Actor()
     args = get_args()
+    env = make_env(args.env_name, discrete_action=True)
+    num_state = env.observation_space[0].shape[0]
+    num_action = env.action_space[0].n
     n_episodes = 100
     save_gifs = False
-    episode_length = 100
+    episode_length = 150
+    # nagents = args.adv_num
     nagents = args.agent_num
-    # nagents = args.agent_num
     ifi = 1 / 30
     gif_path = './gifs'
     success_rate = 0
@@ -106,10 +119,86 @@ if __name__ == '__main__':
     masks = torch.zeros(1, 1)
     
     cover_rate_sum = 0
+
+    starts = []
+    starts_old = []
+    hard_case = []
+    buffer_length = 10000
+    curri = 0
+    N_new = 1000
+    N_old = 500
+    max_step = 0.1
+    TB = 10
+    M = 10000
+    Rmin = 0.1
+    Rmax = 0.5
+    one_starts_landmark = []
+    one_starts_agent = []
+    for j in range(N_new):
+        for i in range(nagents):
+            landmark_location = np.random.uniform(-1, +1, 2) 
+            one_starts_landmark.append(copy.deepcopy(landmark_location))
+        index_sample = BatchSampler(SubsetRandomSampler(range(nagents)),nagents,drop_last=True)
+        for indices in index_sample:
+            for k in indices:
+                one_starts_agent.append(copy.deepcopy(one_starts_landmark[k]+0.01))
+        # pdb.set_trace()
+        starts.append(one_starts_agent+one_starts_landmark)
+        starts_old.append(one_starts_agent+one_starts_landmark)
+        one_starts_agent = []
+        one_starts_landmark = []
+    # hard case
+    agent_location = np.zeros(2)
+    for j in range(n_episodes):
+        for i in range(nagents):
+            agent_location = np.random.uniform(-1.0, -0.7, 2) 
+            one_starts_agent.append(copy.deepcopy(agent_location))
+        for i in range(int(nagents/4.0)):
+            landmark_location = np.random.uniform(-0.5, +0.0, 2) 
+            one_starts_landmark.append(copy.deepcopy(landmark_location))
+        for i in range(int(nagents/4.0),int(nagents/2.0)):
+            landmark_location = np.random.uniform(+0.7, +1.0, 2) 
+            one_starts_landmark.append(copy.deepcopy(landmark_location))
+        for i in range(int(nagents/2.0),int(3*nagents/4.0)):
+            landmark_location[0] = np.random.uniform(-1.0, -0.7, 1) 
+            landmark_location[1] = np.random.uniform(-0.5, +0.0, 1) 
+            one_starts_landmark.append(copy.deepcopy(landmark_location))
+        for i in range(int(3*nagents/4.0),int(4*nagents/4.0)):
+            landmark_location[0] = np.random.uniform(-0.5, +0.0, 1) 
+            landmark_location[1] = np.random.uniform(-0.7, -1.0, 1) 
+            one_starts_landmark.append(copy.deepcopy(landmark_location))
+        hard_case.append(one_starts_agent+one_starts_landmark)
+        one_starts_agent = []
+        one_starts_landmark = []
+
+    Rew = []
+    x1 = []
+    y1 = []
+    x2 = []
+    y2 = []
+
     for ep_i in range(n_episodes):
         print("Episode %i of %i" % (ep_i + 1, n_episodes))
-        # obs = env.reset(nagents)
-        obs = env.init_set(nagents)
+        obs = env.reset(nagents)
+        # obs = env.init_set(nagents,hard_case[ep_i])
+        # sample_index = random.sample(range(len(starts)),1)
+
+        # for i in range(nagents):
+        #     x1.append(starts[sample_index[0]][i][0])
+        #     y1.append(starts[sample_index[0]][i][1])
+        #     x2.append(starts[sample_index[0]][i+nagents][0])
+        #     y2.append(starts[sample_index[0]][i+nagents][1])
+        # plt.scatter(x1,y1,c='#0000FF')
+        # plt.scatter(x2,y2,c='#A52A2A')
+        # x1 = []
+        # y1 = []
+        # x2 = []
+        # y2 = []
+        # if j % 1 == 0 :
+        #     plt.savefig('/home/chenjy/new_version/test_init/test_'+str(ep_i)+'.jpg')
+        #     plt.clf()
+        # obs,rou_index= env.new_starts_obs(starts,nagents,0,sample_index)
+        # pdb.set_trace()
         if save_gifs:
             frames = []
             frames.append(env.render('rgb_array')[0])
@@ -132,7 +221,7 @@ if __name__ == '__main__':
             for i in range(nagents):
                 obs = state[i].view(-1, num_state)
                 # value, action, _, recurrent_hidden_states, alpha_agent, alpha_landmark = agents[i].act(share_obs, obs, nagents, i, recurrent_hidden_states, masks)
-                value, action, _, recurrent_hidden_states = agents[i].act(share_obs, obs, nagents, i, recurrent_hidden_states, masks)
+                value, action, _, recurrent_hidden_states = agents[i].act(share_obs, obs, nagents, recurrent_hidden_states, masks, True)
                 actions.append(action)
                 # al_agent.append(alpha_agent)
                 # al_landmark.append(alpha_landmark)
@@ -155,6 +244,8 @@ if __name__ == '__main__':
             #import pdb; pdb.set_trace()
             # start = time.time()
             obs, rewards, dones, infos = env.step(actions)
+            Rew.append(rewards)
+            # print('step '+ str(t_i) + ': ' + str(rewards))
             #pdb.set_trace()
             # end = time.time()
             # print('env', round(end-start,4))
@@ -181,6 +272,10 @@ if __name__ == '__main__':
                 print('number_reach', reach_num)
                 print('cover rate once', reach_num/nagents)
                 cover_rate_sum = cover_rate_sum + reach_num/nagents
+                # if reach_num/nagents < 1.0:
+                #     print('obs: ', obs)
+                # if reach_num/nagents == 1.0:
+                #     starts = SampleNearby(starts, N_new, max_step, TB, M)
                 # for a in env.world.agents:
                 #     dists = [np.sqrt(np.sum(np.square(a.state.p_pos - l.state.p_pos))) for l in env.world.landmarks]
                 #     if min(dists) > env.world.agents[0].size + env.world.landmarks[0].size:
@@ -192,7 +287,8 @@ if __name__ == '__main__':
                 #     dists = [np.sqrt(np.sum(np.square(a.state.p_pos - l.state.p_pos))) for a in env.world.agents]
                 #     if min(dists) > env.world.agents[0].size + env.world.landmarks[0].size:
                 #         print('landmark_i: ', l.name)
-
+        print('mean rewards: ', np.mean(Rew))
+        Rew = []
 
         if save_gifs:
             gif_num = 0
